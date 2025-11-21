@@ -50,6 +50,10 @@ type Node struct {
 	// Métricas
 	metrics *MetricsCollector
 
+	// Control de inicialización
+	initialized bool
+	initMtx     sync.RWMutex
+
 	signalChannel chan os.Signal
 	shutdownCh    chan struct{}
 }
@@ -208,8 +212,13 @@ func newNode(config *Config) *Node {
 		for {
 			select {
 			case <-ticker.C:
-
-				n.stabilize()
+				// Esperar inicialización antes de estabilizar
+				n.initMtx.RLock()
+				isInit := n.initialized
+				n.initMtx.RUnlock()
+				if isInit {
+					n.stabilize()
+				}
 			case <-n.shutdownCh:
 				ticker.Stop()
 				return
@@ -224,8 +233,14 @@ func newNode(config *Config) *Node {
 		for {
 			select {
 			case <-ticker.C:
-				n.fixFinger(next)
-				next = (next + 1) % n.config.KeySize
+				// Esperar inicialización antes de fix finger
+				n.initMtx.RLock()
+				isInit := n.initialized
+				n.initMtx.RUnlock()
+				if isInit {
+					n.fixFinger(next)
+					next = (next + 1) % n.config.KeySize
+				}
 			case <-n.shutdownCh:
 				ticker.Stop()
 				return
@@ -239,7 +254,13 @@ func newNode(config *Config) *Node {
 		for {
 			select {
 			case <-ticker.C:
-				n.checkPredecessor()
+				// Esperar inicialización antes de check predecessor
+				n.initMtx.RLock()
+				isInit := n.initialized
+				n.initMtx.RUnlock()
+				if isInit {
+					n.checkPredecessor()
+				}
 			case <-n.shutdownCh:
 				ticker.Stop()
 				return
@@ -298,6 +319,13 @@ func (n *Node) create() {
 	n.succMtx.Unlock()
 
 	n.initSuccessorList()
+
+	// Marcar como inicializado - permite que las goroutines de mantenimiento funcionen
+	n.initMtx.Lock()
+	n.initialized = true
+	n.initMtx.Unlock()
+
+	log.Infof("Node successfully created and initialized")
 }
 
 /*
@@ -341,6 +369,13 @@ func (n *Node) join(other *chordpb.Node) error {
 	n.succMtx.Unlock()
 
 	n.initSuccessorList()
+
+	// Marcar como inicializado - permite que las goroutines de mantenimiento funcionen
+	n.initMtx.Lock()
+	n.initialized = true
+	n.initMtx.Unlock()
+
+	log.Infof("Node successfully joined ring and initialized")
 
 	return nil
 }
@@ -499,9 +534,23 @@ func (n *Node) reconcileSuccessorList(succList *chordpb.SuccessorList) {
  */
 // TODO: come back to this after implementing replica groups
 func (n *Node) findSuccessor(id []byte) (*chordpb.Node, error) {
+	// Verificar si el nodo está inicializado antes de proceder
+	n.initMtx.RLock()
+	isInit := n.initialized
+	n.initMtx.RUnlock()
+
+	if !isInit {
+		return nil, fmt.Errorf("node not yet initialized, cannot find successor")
+	}
+
 	n.succMtx.RLock()
 	succ := n.successor
 	n.succMtx.RUnlock()
+
+	// Verificación adicional de seguridad
+	if succ == nil {
+		return nil, fmt.Errorf("successor is nil, node initialization incomplete")
+	}
 
 	if BetweenRightIncl(id, n.Id, succ.Id) {
 		return succ, nil
