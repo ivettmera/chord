@@ -1,1 +1,29 @@
-.idea
+.idea# Binarios compilados
+bin/
+server/chord
+client/chord
+
+# Archivos temporales
+*.tmp
+*.log
+nohup.out
+
+# Resultados de experimentos
+results/
+metrics_*/
+*.csv
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Go específicos
+vendor/
+
+# Archivos específicos del proyecto

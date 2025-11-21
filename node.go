@@ -3,10 +3,8 @@ package chord
 import (
 	"bytes"
 	"errors"
-	"github.com/cdesiniotis/chord/chordpb"
-	log "github.com/sirupsen/logrus"
-	"google.golang.org/grpc"
-	"io/ioutil"
+	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -14,6 +12,10 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/cdesiniotis/chord/chordpb"
+	log "github.com/sirupsen/logrus"
+	"google.golang.org/grpc"
 )
 
 // Node implements the Chord GRPC Server interface
@@ -41,9 +43,12 @@ type Node struct {
 	connPool    map[string]*clientConn
 	connPoolMtx sync.RWMutex
 
-	rgs 	map[uint64]*ReplicaGroup
-	rgsMtx	sync.RWMutex
-	rgFlag	int		// set to 1 initially, 0 after node sends its first Coordinator Msg
+	rgs    map[uint64]*ReplicaGroup
+	rgsMtx sync.RWMutex
+	rgFlag int // set to 1 initially, 0 after node sends its first Coordinator Msg
+
+	// Métricas
+	metrics *MetricsCollector
 
 	signalChannel chan os.Signal
 	shutdownCh    chan struct{}
@@ -105,22 +110,38 @@ func newNode(config *Config) *Node {
 			serverOpts: config.ServerOpts,
 			dialOpts:   config.DialOpts,
 			timeout:    time.Duration(config.Timeout) * time.Millisecond},
-		rgs:		make(map[uint64]*ReplicaGroup),
-		rgFlag: 	1,
+		rgs:           make(map[uint64]*ReplicaGroup),
+		rgFlag:        1,
 		shutdownCh:    make(chan struct{}),
 		signalChannel: make(chan os.Signal, 1),
 	}
 
 	// Get PeerID
-	key := n.Addr + ":" + strconv.Itoa(int(n.Port))
-	n.Id = GetPeerID(key, config.KeySize)
+	key := n.Node.Addr + ":" + strconv.Itoa(int(n.Node.Port))
+	n.Node.Id = GetPeerID(key, config.KeySize)
+
+	// Inicializar métricas si está habilitado
+	if config.EnableMetrics {
+		nodeID := fmt.Sprintf("node_%s_%d", n.Node.Addr, n.Node.Port)
+		outputDir := config.MetricsOutputDir
+		if outputDir == "" {
+			outputDir = "metrics"
+		}
+
+		metrics, err := NewMetricsCollector(nodeID, outputDir)
+		if err != nil {
+			log.Warnf("Error inicializando métricas: %v", err)
+		} else {
+			n.metrics = metrics
+		}
+	}
 
 	// Create new finger table
 	n.fingerTable = NewFingerTable(n, config.KeySize)
 
 	// Allocate a RG for us
 	id := BytesToUint64(n.Id)
-	n.rgs[id] = &ReplicaGroup{leaderId:n.Id, data:make(map[string][]byte)}
+	n.rgs[id] = &ReplicaGroup{leaderId: n.Id, data: make(map[string][]byte)}
 
 	// Create a listening socket for the chord grpc server
 	lis, err := net.Listen("tcp", key)
@@ -158,7 +179,7 @@ func newNode(config *Config) *Node {
 	// Thread 3: Debug
 	// Check config to check if logging is disabled
 	if config.Logging == false {
-		log.SetOutput(ioutil.Discard)
+		log.SetOutput(io.Discard)
 	} else {
 		go func() {
 			ticker := time.NewTicker(10 * time.Second)
@@ -180,7 +201,6 @@ func newNode(config *Config) *Node {
 			}
 		}()
 	}
-
 
 	// Thread 4: Stabilization protocol
 	go func() {
@@ -239,6 +259,12 @@ func newNode(config *Config) *Node {
 func (n *Node) shutdown() {
 	log.Infof("In shutdown()\n")
 	close(n.shutdownCh)
+
+	// Cerrar métricas si están habilitadas
+	if n.metrics != nil {
+		log.Infof("Closing metrics collector...\n")
+		n.metrics.Close()
+	}
 
 	log.Infof("Closing grpc server...\n")
 	n.grpcServer.Stop()
@@ -398,7 +424,7 @@ func (n *Node) updateSuccessorList() {
 		if err != nil {
 			log.Errorf("successor failed while calling GetSuccessorListRPC: %v\n", err)
 			// update successor the next entry in successor table
-			if index == n.config.SuccessorListSize - 1 {
+			if index == n.config.SuccessorListSize-1 {
 				break
 			}
 			n.succMtx.Lock()
@@ -527,7 +553,7 @@ func (n *Node) closestPrecedingNode(id []byte, exclude ...*chordpb.Node) *chordp
 
 	// Look in successor list
 	n.succListMtx.RLock()
-	for i := n.config.SuccessorListSize - 1; i >= 0; i--{
+	for i := n.config.SuccessorListSize - 1; i >= 0; i-- {
 		succListEntry := n.successorList[i]
 		if Contains(exclude, succListEntry) {
 			continue
@@ -588,7 +614,7 @@ func (n *Node) checkPredecessor() {
 		n.succListMtx.RUnlock()
 		// send coordinator msg to all
 		log.Infof("In checkPredecessor() - sending coordinator msg: new %d\t old: %d\n", n.Id, pred.Id)
-		for _, node := range  succList {
+		for _, node := range succList {
 			n.RecvCoordinatorMsgRPC(node, n.Id, pred.Id)
 		}
 
@@ -634,7 +660,7 @@ func (n *Node) get(key string) ([]byte, error) {
 		return nil, err
 	}
 
-	if bytes.Compare(n.Id, node.Id) == 0 {
+	if bytes.Equal(n.Id, node.Id) {
 		// key is stored at current node
 		myId := BytesToUint64(n.Id)
 		n.rgsMtx.RLock()
@@ -672,7 +698,7 @@ func (n *Node) put(key string, value []byte) error {
 		return err
 	}
 
-	if bytes.Compare(n.Id, node.Id) == 0 {
+	if bytes.Equal(n.Id, node.Id) {
 		// key belongs to current node
 
 		// store kv in our datastore

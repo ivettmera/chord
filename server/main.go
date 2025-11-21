@@ -1,12 +1,13 @@
 package main
 
 import (
+	"strconv"
+	"time"
+
 	"github.com/cdesiniotis/chord"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"strconv"
-	"time"
 )
 
 func Create(cfg *chord.Config) error {
@@ -41,8 +42,10 @@ func defaults() map[string]interface{} {
 		"stabilizeinterval":        250,
 		"fixfingerinterval":        50,
 		"checkpredecessorinterval": 150,
-		"successorlistsize":		2,
-		"logging":					true,
+		"successorlistsize":        2,
+		"logging":                  true,
+		"enablemetrics":            false,
+		"metricsoutputdir":         "metrics",
 	}
 }
 
@@ -68,6 +71,14 @@ func main() {
 		Long:  `create is for creating a new chord distributed hash table`,
 		Args:  cobra.ExactArgs(0),
 		Run: func(cmd *cobra.Command, args []string) {
+			// Habilitar métricas si se especifica el flag
+			enableMetrics, _ := cmd.Flags().GetBool("metrics")
+			metricsDir, _ := cmd.Flags().GetString("metrics-dir")
+			if enableMetrics {
+				cfg.EnableMetrics = true
+				cfg.MetricsOutputDir = metricsDir
+			}
+
 			err := Create(cfg)
 			if err != nil {
 				log.Fatalf("error calling Create(cfg): %v\n", err)
@@ -84,6 +95,14 @@ func main() {
 		Long:  `join is for joining an existing chord dht ring by contacting the node at ip:port`,
 		Args:  cobra.ExactArgs(2),
 		Run: func(cmd *cobra.Command, args []string) {
+			// Habilitar métricas si se especifica el flag
+			enableMetrics, _ := cmd.Flags().GetBool("metrics")
+			metricsDir, _ := cmd.Flags().GetString("metrics-dir")
+			if enableMetrics {
+				cfg.EnableMetrics = true
+				cfg.MetricsOutputDir = metricsDir
+			}
+
 			port, err := strconv.Atoi(args[1])
 			if err != nil {
 				log.Fatalf("port field in config is not valid\n")
@@ -100,6 +119,13 @@ func main() {
 	}
 
 	var rootCmd = &cobra.Command{Use: "chord"}
+
+	// Agregar flags globales
+	rootCmd.PersistentFlags().Bool("metrics", false, "Enable metrics collection")
+	rootCmd.PersistentFlags().String("metrics-dir", "metrics", "Directory for metrics output")
+	rootCmd.PersistentFlags().String("addr", "0.0.0.0", "Address to bind to")
+	rootCmd.PersistentFlags().Int("port", 8000, "Port to bind to")
+
 	rootCmd.AddCommand(cmdCreate, cmdJoin)
 	rootCmd.Execute()
 }
